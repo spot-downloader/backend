@@ -1,0 +1,43 @@
+{
+  "name": "backend-spotifydownloader",
+  "version": "1.0.0",
+  "description": "Backend API for Spotify Downloader - Download tracks, albums, and playlists from Spotify",
+  "main": "index.js",
+  "scripts": {
+    "dev": "nodemon index.js",
+    "start": "node index.js",
+    "worker": "node worker.js"
+  },
+  "keywords": [
+    "spotify",
+    "downloader",
+    "spotify-downloader",
+    "music",
+    "download",
+    "nodejs",
+    "express",
+    "redis",
+    "youtube-dl"
+  ],
+  "author": "rohidtzz",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rohidtzz/backend-spotifydownloader.git"
+  },
+  "bugs": {
+    "url": "https://github.com/rohidtzz/backend-spotifydownloader/issues"
+  },
+  "homepage": "https://github.com/rohidtzz/backend-spotifydownloader#readme",
+  "license": "GPL-3.0-or-later",
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "body-parser": "^2.2.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.2",
+    "express": "^5.1.0",
+    "ioredis": "^5.7.0",
+    "nodemon": "3.1.10",
+    "spotify-web-api-node": "^5.0.2",
+    "youtube-dl-exec": "^3.0.25"
+  }
+}

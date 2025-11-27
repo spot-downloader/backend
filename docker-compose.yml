@@ -1,0 +1,70 @@
+services:
+
+  redis:
+    image: redis:7-alpine
+    container_name: spotifydownloader-redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: spotifydownloader-backend
+    ports:
+      - "${PORT}:3081"
+    environment:
+      - NODE_ENV=${NODE_ENV}
+      - PORT=3081
+      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
+      - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
+      - CORS_ORIGINS=${CORS_ORIGINS}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=
+    volumes:
+      - downloads_data:/app/downloads
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - spotifydownloader-network
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: spotifydownloader-worker
+    environment:
+      - NODE_ENV=${NODE_ENV}
+      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
+      - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=
+    volumes:
+      - downloads_data:/app/downloads
+    restart: unless-stopped
+    command: ["npm", "run", "worker"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - spotifydownloader-network
+
+volumes:
+  downloads_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  spotifydownloader-network:
+    driver: bridge

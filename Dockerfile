@@ -1,0 +1,41 @@
+
+FROM node:20-alpine
+
+# Install system dependencies required for youtube-dl and other tools
+RUN apk add --no-cache \
+    python3 \
+    py3-pip \
+    curl \
+    ffmpeg \
+    && pip3 install --break-system-packages youtube-dl yt-dlp
+
+# Set working directory
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install Node.js dependencies
+RUN npm ci --only=production
+
+# Copy application code
+COPY . .
+
+# Create downloads directory
+RUN mkdir -p downloads/playlist downloads/track downloads/album downloads/artist
+
+# Create a non-root user
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nodejs -u 1001 -G nodejs
+
+# Change ownership of the app directory to the nodejs user
+RUN chown -R nodejs:nodejs /app
+
+# Switch to non-root user
+USER nodejs
+
+# Expose port
+EXPOSE 3081
+
+# Start the application
+CMD ["npm", "start"]
