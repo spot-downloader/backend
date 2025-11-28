@@ -6,6 +6,7 @@ const path = require("path");
 const fs = require("fs");
 const archiver = require("archiver");
 const cors = require('cors');
+const Redis = require('ioredis');
 
 dotenv.config();
 
@@ -13,14 +14,166 @@ const app = express();
 
 const port = process.env.PORT || 3000;
 
+// Redis for SSE progress tracking
+let redisAvailable = true;
+const redis = new Redis({
+    host: process.env.REDIS_HOST || 'localhost',
+    port: process.env.REDIS_PORT || 6379,
+    password: process.env.REDIS_PASSWORD || undefined,
+    retryStrategy: (times) => {
+        if (times > 3) {
+            redisAvailable = false;
+            console.log('❌ Redis not available, SSE progress tracking disabled');
+            return null; // Stop retrying
+        }
+        return Math.min(times * 100, 3000);
+    }
+});
+
+redis.on('error', (err) => {
+    if (redisAvailable) {
+        console.error('Redis connection error:', err.message);
+        redisAvailable = false;
+    }
+});
+
+redis.on('connect', () => {
+    redisAvailable = true;
+    console.log('✅ Redis connected for SSE');
+});
+
 app.use(cors({
     origin: process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(',') : ['http://localhost:5173'],
     methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Cache-Control'],
     credentials: true
 }));
 
 app.use(bodyParser.json());
+
+// SSE endpoint for progress tracking
+app.get("/progress/:jobId", async (req, res) => {
+    const { jobId } = req.params;
+    
+    // Set CORS headers explicitly for SSE
+    const allowedOrigins = process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(',') : ['http://localhost:5173'];
+    const origin = req.headers.origin;
+    if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
+        res.setHeader('Access-Control-Allow-Origin', origin || '*');
+    } else {
+        res.setHeader('Access-Control-Allow-Origin', allowedOrigins[0]);
+    }
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Cache-Control');
+    
+    // SSE headers
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
+    res.flushHeaders();
+
+    // Check if Redis is available
+    if (!redisAvailable) {
+        res.write(`data: ${JSON.stringify({ type: 'error', message: 'SSE not available, use polling', usePolling: true })}\n\n`);
+        res.end();
+        return;
+    }
+
+    // Send initial connection message
+    res.write(`data: ${JSON.stringify({ type: 'connected', jobId })}\n\n`);
+
+    // Keep connection alive with heartbeat
+    const heartbeat = setInterval(() => {
+        res.write(`: heartbeat\n\n`);
+    }, 30000);
+
+    // Subscribe to Redis channel for this job
+    let subscriber;
+    try {
+        subscriber = new Redis({
+            host: process.env.REDIS_HOST || 'localhost',
+            port: process.env.REDIS_PORT || 6379,
+            password: process.env.REDIS_PASSWORD || undefined,
+            lazyConnect: true,
+            connectTimeout: 5000,
+        });
+        
+        await subscriber.connect();
+    } catch (err) {
+        console.error('Failed to connect subscriber:', err);
+        res.write(`data: ${JSON.stringify({ type: 'error', message: 'Redis connection failed, use polling', usePolling: true })}\n\n`);
+        clearInterval(heartbeat);
+        res.end();
+        return;
+    }
+
+    const channel = `progress:${jobId}`;
+    
+    subscriber.subscribe(channel, (err) => {
+        if (err) {
+            console.error('Failed to subscribe:', err);
+            res.write(`data: ${JSON.stringify({ type: 'error', message: 'Failed to subscribe', usePolling: true })}\n\n`);
+            clearInterval(heartbeat);
+            res.end();
+        } else {
+            console.log(`Subscribed to channel: ${channel}`);
+        }
+    });
+
+    let isClosing = false;
+    
+    const cleanup = () => {
+        if (isClosing) return;
+        isClosing = true;
+        
+        clearInterval(heartbeat);
+        if (subscriber && subscriber.status === 'ready') {
+            subscriber.unsubscribe(channel).catch(() => {});
+            subscriber.quit().catch(() => {});
+        }
+    };
+
+    subscriber.on('message', (ch, message) => {
+        if (ch === channel && !isClosing) {
+            try {
+                res.write(`data: ${message}\n\n`);
+            } catch (e) {
+                // Response already closed
+                cleanup();
+                return;
+            }
+            
+            // Check if job is done or failed
+            try {
+                const data = JSON.parse(message);
+                if (data.status === 'done' || data.status === 'failed') {
+                    setTimeout(() => {
+                        cleanup();
+                        try {
+                            res.end();
+                        } catch (e) {}
+                    }, 1000);
+                }
+            } catch (e) {}
+        }
+    });
+
+    subscriber.on('error', (err) => {
+        console.error('Redis subscriber error:', err);
+        if (!isClosing) {
+            try {
+                res.write(`data: ${JSON.stringify({ type: 'error', message: 'Redis connection error', usePolling: true })}\n\n`);
+            } catch (e) {}
+        }
+    });
+
+    // Handle client disconnect
+    req.on('close', () => {
+        console.log(`Client disconnected from ${channel}`);
+        cleanup();
+    });
+});
 
 
 app.post("/download", async (req, res) => {

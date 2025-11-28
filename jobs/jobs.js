@@ -19,7 +19,23 @@ redis.on('error', (err) => {
 
 async function addJobs(url, status) {
     try {
-        // Check if job already exists in queue
+        // Check if job is currently processing
+        const processingKeys = await redis.keys('job:processing:*');
+        for (const key of processingKeys) {
+            const jobStr = await redis.get(key);
+            if (!jobStr) continue;
+            
+            try {
+                const existingJob = JSON.parse(jobStr);
+                if (existingJob.url === url) {
+                    return { url, id: existingJob.id, status: 'processing', existing: true };
+                }
+            } catch (e) {
+                console.error('Error parsing processing job:', e);
+            }
+        }
+        
+        // Check if job already exists in queue (pending jobs)
         const queueLength = await redis.llen('jobs:downloader');
         
         for (let i = 0; i < queueLength; i++) {
@@ -28,19 +44,22 @@ async function addJobs(url, status) {
             
             try {
                 const existingJob = JSON.parse(jobStr);
-                if (existingJob.url === url && ['pending', 'processing'].includes(existingJob.status)) {
-                    return { url, id: existingJob.id, existing: true };
+                if (existingJob.url === url && existingJob.status === 'pending') {
+                    return { url, id: existingJob.id, status: existingJob.status, existing: true };
                 }
             } catch (e) {
                 console.error('Error parsing existing job:', e);
             }
         }
 
-        // Check if job exists in completed queue
-        const completedJob = await redis.lindex('jobs:completed', 0);
-        if (completedJob) {
+        // Check if job exists in completed queue (check all, not just first)
+        const completedLength = await redis.llen('jobs:completed');
+        for (let i = 0; i < completedLength; i++) {
+            const completedJobStr = await redis.lindex('jobs:completed', i);
+            if (!completedJobStr) continue;
+            
             try {
-                const completed = JSON.parse(completedJob);
+                const completed = JSON.parse(completedJobStr);
                 if (completed.url === url) {
                     return { url, id: completed.id, status: 'done', payload: completed.payload };
                 }
@@ -55,13 +74,12 @@ async function addJobs(url, status) {
             id: jobId,
             url,
             status,
-            attempt: 0,
             createdAt: Date.now(),
             updatedAt: Date.now()
         };
 
-        await redis.lpush('jobs:downloader', JSON.stringify(job));
-        return { url, id: jobId };
+        await redis.rpush('jobs:downloader', JSON.stringify(job));
+        return { url, id: jobId, status };
 
     } catch (error) {
         console.error('Error adding job:', error);
@@ -87,7 +105,23 @@ async function getJobsByUrl(url) {
             }
         }
 
-        // Check in active queue
+        // Check if job is currently processing
+        const processingKeys = await redis.keys('job:processing:*');
+        for (const key of processingKeys) {
+            const jobStr = await redis.get(key);
+            if (!jobStr) continue;
+            
+            try {
+                const job = JSON.parse(jobStr);
+                if (job.url === url) {
+                    return [job];
+                }
+            } catch (e) {
+                console.error('Error parsing processing job:', e);
+            }
+        }
+
+        // Check in pending queue
         const queueLength = await redis.llen('jobs:downloader');
         for (let i = 0; i < queueLength; i++) {
             const jobStr = await redis.lindex('jobs:downloader', i);

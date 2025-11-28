@@ -18,6 +18,32 @@ const redis = new Redis({
     }
 });
 
+// Publisher for progress updates
+const publisher = new Redis({
+    host: process.env.REDIS_HOST || 'localhost',
+    port: process.env.REDIS_PORT || 6379,
+    password: process.env.REDIS_PASSWORD || undefined,
+});
+
+publisher.on('connect', () => {
+    console.log('✅ Publisher connected to Redis');
+});
+
+publisher.on('error', (err) => {
+    console.error('❌ Publisher Redis error:', err);
+});
+
+// Function to publish progress
+async function publishProgress(jobId, data) {
+    const channel = `progress:${jobId}`;
+    try {
+        const result = await publisher.publish(channel, JSON.stringify(data));
+        console.log(`📡 Published to ${channel}: ${data.message || data.type} (subscribers: ${result})`);
+    } catch (err) {
+        console.error(`❌ Failed to publish to ${channel}:`, err);
+    }
+}
+
 redis.on('connect', () => {
     console.log('✅ Connected to Redis');
 });
@@ -77,33 +103,6 @@ function checkIfFileExists(trackName, artist, folder) {
     });
 }
 
-// Recovery function untuk jobs yang stuck
-async function recoverStuckJobs() {
-    console.log('🔧 Checking for stuck jobs...');
-    
-    const queueLength = await redis.llen('jobs:downloader');
-    const fifteenMinutesAgo = Date.now() - (15 * 60 * 1000);
-    
-    for (let i = 0; i < queueLength; i++) {
-        const jobStr = await redis.lindex('jobs:downloader', i);
-        if (!jobStr) continue;
-        
-        try {
-            const job = JSON.parse(jobStr);
-            
-            // Reset jobs yang stuck processing lebih dari 15 menit
-            if (job.status === 'processing' && job.updatedAt < fifteenMinutesAgo) {
-                job.status = 'pending';
-                job.attempt = (job.attempt || 0) + 1;
-                await redis.lset('jobs:downloader', i, JSON.stringify(job));
-                console.log(`⚠️ Recovered stuck job: ${job.url}`);
-            }
-        } catch (e) {
-            console.error('Error parsing job during recovery:', e);
-        }
-    }
-}
-
 async function processJobs(){
     // Ambil job pertama dari queue tanpa menghapusnya dulu
     const jobStr = await redis.lindex('jobs:downloader', 0);
@@ -114,36 +113,42 @@ async function processJobs(){
         job = JSON.parse(jobStr);
     } catch (e) {
         console.error('Invalid job format:', jobStr);
-        await redis.lrem('jobs:downloader', 1, jobStr);
+        await redis.lpop('jobs:downloader');
         return;
     }
 
-    // Skip jika job sudah processing (stuck job akan di-handle oleh recovery)
+    // Skip jika job sudah processing (worker lain mungkin sedang mengerjakan)
     if (job.status === 'processing') {
-        // Cek apakah job stuck lebih dari 5 menit
-        const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
-        if (job.updatedAt && job.updatedAt < fiveMinutesAgo) {
-            console.log('⚠️ Recovering stuck job...');
-            job.status = 'pending';
-            job.attempt = (job.attempt || 0) + 1;
-            await redis.lset('jobs:downloader', 0, JSON.stringify(job));
-        }
         return;
     }
 
     // Skip jika job bukan pending
     if (job.status !== 'pending') {
-        await redis.lrem('jobs:downloader', 1, jobStr);
+        await redis.lpop('jobs:downloader');
         return;
     }
 
-    // Update ke processing
+    // Ambil job dari queue (remove dari depan) dan simpan untuk diproses
+    await redis.lpop('jobs:downloader');
+    
+    // Update status ke processing
     job.status = 'processing';
     job.updatedAt = Date.now();
-    job.attempt = job.attempt || 0;
-    await redis.lset('jobs:downloader', 0, JSON.stringify(job));
+    
+    // Simpan job yang sedang diproses di key terpisah
+    await redis.set(`job:processing:${job.id}`, JSON.stringify(job));
 
     console.log('processing  \n');
+    
+    // Publish initial progress
+    await publishProgress(job.id, {
+        status: 'processing',
+        type: 'started',
+        message: 'Memulai proses download...',
+        progress: 0,
+        total: 1,
+        current: 0
+    });
 
     try {
         await getAccessToken();
@@ -159,12 +164,38 @@ async function processJobs(){
             const name = trackName + ' - ' + artist;
             job.payload = name;
 
+            await publishProgress(job.id, {
+                status: 'processing',
+                type: 'downloading',
+                message: `Downloading: ${trackName} - ${artist}`,
+                currentTrack: `${trackName} - ${artist}`,
+                progress: 0,
+                total: 1,
+                current: 0
+            });
+
             // Cek apakah file sudah ada
             if (checkIfFileExists(trackName, artist, folder)) {
                 console.log(`✅ File sudah ada, skip download: ${trackName} - ${artist} \n`);
+                await publishProgress(job.id, {
+                    status: 'processing',
+                    type: 'skipped',
+                    message: `File sudah ada: ${trackName} - ${artist}`,
+                    progress: 100,
+                    total: 1,
+                    current: 1
+                });
             } else {
                 console.log(`⬇️ Downloading : ${trackName} - ${artist} \n`);
                 await downloadTrack(`${trackName} ${artist}`, folder);
+                await publishProgress(job.id, {
+                    status: 'processing',
+                    type: 'downloaded',
+                    message: `Selesai: ${trackName} - ${artist}`,
+                    progress: 100,
+                    total: 1,
+                    current: 1
+                });
             }
 
         } else if (job.url.includes("playlist/")) {
@@ -182,15 +213,71 @@ async function processJobs(){
             job.payload = playlistName;
 
             console.log(`🎵 Processing playlist: ${playlistName} (${tracks.length} tracks)`);
+            
+            await publishProgress(job.id, {
+                status: 'processing',
+                type: 'info',
+                message: `Memproses playlist: ${playlistName}`,
+                playlistName,
+                progress: 0,
+                total: tracks.length,
+                current: 0
+            });
 
             for (let j = 0; j < tracks.length; j++) {
                 const t = tracks[j];
-                console.log(`Downloading (${j + 1}/${tracks.length}): ${t.name} - ${t.artist}`);
+                const trackNum = j + 1;
+                
+                // Skip jika file sudah ada
+                if (checkIfFileExists(t.name, t.artist, folder)) {
+                    console.log(`✅ Skip (${trackNum}/${tracks.length}): ${t.name} - ${t.artist} (sudah ada)`);
+                    await publishProgress(job.id, {
+                        status: 'processing',
+                        type: 'skipped',
+                        message: `Skip (${trackNum}/${tracks.length}): ${t.name} - ${t.artist} (sudah ada)`,
+                        currentTrack: `${t.name} - ${t.artist}`,
+                        progress: Math.round((trackNum / tracks.length) * 100),
+                        total: tracks.length,
+                        current: trackNum
+                    });
+                    continue;
+                }
+                
+                console.log(`Downloading (${trackNum}/${tracks.length}): ${t.name} - ${t.artist}`);
+                
+                await publishProgress(job.id, {
+                    status: 'processing',
+                    type: 'downloading',
+                    message: `Downloading (${trackNum}/${tracks.length}): ${t.name} - ${t.artist}`,
+                    currentTrack: `${t.name} - ${t.artist}`,
+                    progress: Math.round((j / tracks.length) * 100),
+                    total: tracks.length,
+                    current: trackNum
+                });
                 
                 try {
                     await downloadTrack(`${t.name} ${t.artist}`, folder);
+                    await publishProgress(job.id, {
+                        status: 'processing',
+                        type: 'downloaded',
+                        message: `Selesai (${trackNum}/${tracks.length}): ${t.name} - ${t.artist}`,
+                        currentTrack: `${t.name} - ${t.artist}`,
+                        progress: Math.round((trackNum / tracks.length) * 100),
+                        total: tracks.length,
+                        current: trackNum
+                    });
                 } catch (trackError) {
                     console.log(`   ❌ Failed: ${trackError.message}`);
+                    await publishProgress(job.id, {
+                        status: 'processing',
+                        type: 'track_failed',
+                        message: `Gagal (${trackNum}/${tracks.length}): ${t.name} - ${t.artist}`,
+                        currentTrack: `${t.name} - ${t.artist}`,
+                        error: trackError.message,
+                        progress: Math.round((trackNum / tracks.length) * 100),
+                        total: tracks.length,
+                        current: trackNum
+                    });
                 }
             }
 
@@ -211,15 +298,71 @@ async function processJobs(){
             job.payload = albumName;
 
             console.log(`🎵 Processing album: ${albumName} (${tracks.length} tracks)`);
+            
+            await publishProgress(job.id, {
+                status: 'processing',
+                type: 'info',
+                message: `Memproses album: ${albumName}`,
+                albumName,
+                progress: 0,
+                total: tracks.length,
+                current: 0
+            });
 
             for (let j = 0; j < tracks.length; j++) {
                 const t = tracks[j];
-                console.log(`Downloading (${j + 1}/${tracks.length}): ${t.name} - ${t.artist}`);
+                const trackNum = j + 1;
+                
+                // Skip jika file sudah ada
+                if (checkIfFileExists(t.name, t.artist, folder)) {
+                    console.log(`✅ Skip (${trackNum}/${tracks.length}): ${t.name} - ${t.artist} (sudah ada)`);
+                    await publishProgress(job.id, {
+                        status: 'processing',
+                        type: 'skipped',
+                        message: `Skip (${trackNum}/${tracks.length}): ${t.name} - ${t.artist} (sudah ada)`,
+                        currentTrack: `${t.name} - ${t.artist}`,
+                        progress: Math.round((trackNum / tracks.length) * 100),
+                        total: tracks.length,
+                        current: trackNum
+                    });
+                    continue;
+                }
+                
+                console.log(`Downloading (${trackNum}/${tracks.length}): ${t.name} - ${t.artist}`);
+
+                await publishProgress(job.id, {
+                    status: 'processing',
+                    type: 'downloading',
+                    message: `Downloading (${trackNum}/${tracks.length}): ${t.name} - ${t.artist}`,
+                    currentTrack: `${t.name} - ${t.artist}`,
+                    progress: Math.round((j / tracks.length) * 100),
+                    total: tracks.length,
+                    current: trackNum
+                });
 
                 try {
                     await downloadTrack(`${t.name} ${t.artist}`, folder);
+                    await publishProgress(job.id, {
+                        status: 'processing',
+                        type: 'downloaded',
+                        message: `Selesai (${trackNum}/${tracks.length}): ${t.name} - ${t.artist}`,
+                        currentTrack: `${t.name} - ${t.artist}`,
+                        progress: Math.round((trackNum / tracks.length) * 100),
+                        total: tracks.length,
+                        current: trackNum
+                    });
                 } catch (trackError) {
                     console.log(`   ❌ Failed: ${trackError.message}`);
+                    await publishProgress(job.id, {
+                        status: 'processing',
+                        type: 'track_failed',
+                        message: `Gagal (${trackNum}/${tracks.length}): ${t.name} - ${t.artist}`,
+                        currentTrack: `${t.name} - ${t.artist}`,
+                        error: trackError.message,
+                        progress: Math.round((trackNum / tracks.length) * 100),
+                        total: tracks.length,
+                        current: trackNum
+                    });
                 }
             }
 
@@ -242,15 +385,71 @@ async function processJobs(){
             job.payload = artistName;
 
             console.log(`🎵 Processing artist: ${artistName} (${tracks.length} top tracks)`);
+            
+            await publishProgress(job.id, {
+                status: 'processing',
+                type: 'info',
+                message: `Memproses artist: ${artistName} (${tracks.length} top tracks)`,
+                artistName,
+                progress: 0,
+                total: tracks.length,
+                current: 0
+            });
 
             for (let j = 0; j < tracks.length; j++) {
                 const t = tracks[j];
-                console.log(`Downloading (${j + 1}/${tracks.length}): ${t.name} - ${t.artist}`);
+                const trackNum = j + 1;
+                
+                // Skip jika file sudah ada
+                if (checkIfFileExists(t.name, t.artist, folder)) {
+                    console.log(`✅ Skip (${trackNum}/${tracks.length}): ${t.name} - ${t.artist} (sudah ada)`);
+                    await publishProgress(job.id, {
+                        status: 'processing',
+                        type: 'skipped',
+                        message: `Skip (${trackNum}/${tracks.length}): ${t.name} - ${t.artist} (sudah ada)`,
+                        currentTrack: `${t.name} - ${t.artist}`,
+                        progress: Math.round((trackNum / tracks.length) * 100),
+                        total: tracks.length,
+                        current: trackNum
+                    });
+                    continue;
+                }
+                
+                console.log(`Downloading (${trackNum}/${tracks.length}): ${t.name} - ${t.artist}`);
+
+                await publishProgress(job.id, {
+                    status: 'processing',
+                    type: 'downloading',
+                    message: `Downloading (${trackNum}/${tracks.length}): ${t.name} - ${t.artist}`,
+                    currentTrack: `${t.name} - ${t.artist}`,
+                    progress: Math.round((j / tracks.length) * 100),
+                    total: tracks.length,
+                    current: trackNum
+                });
 
                 try {
                     await downloadTrack(`${t.name} ${t.artist}`, folder);
+                    await publishProgress(job.id, {
+                        status: 'processing',
+                        type: 'downloaded',
+                        message: `Selesai (${trackNum}/${tracks.length}): ${t.name} - ${t.artist}`,
+                        currentTrack: `${t.name} - ${t.artist}`,
+                        progress: Math.round((trackNum / tracks.length) * 100),
+                        total: tracks.length,
+                        current: trackNum
+                    });
                 } catch (trackError) {
                     console.log(`   ❌ Failed: ${trackError.message}`);
+                    await publishProgress(job.id, {
+                        status: 'processing',
+                        type: 'track_failed',
+                        message: `Gagal (${trackNum}/${tracks.length}): ${t.name} - ${t.artist}`,
+                        currentTrack: `${t.name} - ${t.artist}`,
+                        error: trackError.message,
+                        progress: Math.round((trackNum / tracks.length) * 100),
+                        total: tracks.length,
+                        current: trackNum
+                    });
                 }
             }
 
@@ -258,34 +457,35 @@ async function processJobs(){
 
         } else {
             console.log('invalid url:', job.url);
+            await publishProgress(job.id, {
+                status: 'failed',
+                type: 'error',
+                message: 'URL tidak valid',
+                progress: 0
+            });
         }
 
     } catch (err) {
         console.error('Error processing job:', err);
 
-        // Check if this is the 4th attempt
-        if (job.attempt >= 3) {
-            // Mark as failed after 4 attempts (0, 1, 2, 3)
-            job.status = 'failed';
-            job.attempt = job.attempt + 1;
-            job.error = err.message;
-            await redis.lset('jobs:downloader', 0, JSON.stringify(job));
-            
-            console.log("job failed after 4 attempts \n\n");
-            
-            // Remove from queue dan pindahkan ke failed queue
-            await redis.lrem('jobs:downloader', 1, jobStr);
-            await redis.lpush('jobs:failed', JSON.stringify(job));
-            return;
-        } else {
-            // Retry the job
-            job.status = 'pending';
-            job.attempt = job.attempt + 1;
-            await redis.lset('jobs:downloader', 0, JSON.stringify(job));
-            
-            console.log("failed, will retry \n\n");
-            return;
-        }
+        // Mark as failed immediately
+        job.status = 'failed';
+        job.error = err.message;
+        job.updatedAt = Date.now();
+        
+        console.log("job failed \n\n");
+        
+        await publishProgress(job.id, {
+            status: 'failed',
+            type: 'failed',
+            message: `Download gagal: ${err.message}`,
+            error: err.message
+        });
+        
+        // Remove from processing key dan pindahkan ke failed queue
+        await redis.del(`job:processing:${job.id}`);
+        await redis.lpush('jobs:failed', JSON.stringify(job));
+        return;
     }
 
     // Mark as done and remove from queue
@@ -293,7 +493,16 @@ async function processJobs(){
     job.updatedAt = Date.now();
     console.log("done \n\n");
     
-    await redis.lrem('jobs:downloader', 1, jobStr);
+    await publishProgress(job.id, {
+        status: 'done',
+        type: 'completed',
+        message: 'Download selesai!',
+        payload: job.payload,
+        progress: 100
+    });
+    
+    // Remove from processing key and add to completed
+    await redis.del(`job:processing:${job.id}`);
     await redis.lpush('jobs:completed', JSON.stringify(job));
 }
 
@@ -302,21 +511,21 @@ async function gracefulShutdown(signal) {
     console.log(`\n🛑 Worker shutting down (${signal})...`);
     
     try {
-        // Reset processing jobs back to pending
-        const queueLength = await redis.llen('jobs:downloader');
+        // Find all processing jobs and put them back to queue
+        const keys = await redis.keys('job:processing:*');
         let resetCount = 0;
         
-        for (let i = 0; i < queueLength; i++) {
-            const jobStr = await redis.lindex('jobs:downloader', i);
+        for (const key of keys) {
+            const jobStr = await redis.get(key);
             if (!jobStr) continue;
             
             try {
                 const job = JSON.parse(jobStr);
-                if (job.status === 'processing') {
-                    job.status = 'pending';
-                    await redis.lset('jobs:downloader', i, JSON.stringify(job));
-                    resetCount++;
-                }
+                job.status = 'pending';
+                // Put back to queue for retry
+                await redis.rpush('jobs:downloader', JSON.stringify(job));
+                await redis.del(key);
+                resetCount++;
             } catch (e) {
                 console.error('Error parsing job during shutdown:', e);
             }
@@ -326,9 +535,10 @@ async function gracefulShutdown(signal) {
             console.log(`🔄 Reset ${resetCount} processing jobs to pending`);
         }
         
-        // Close Redis connection
+        // Close Redis connections
+        await publisher.quit();
         await redis.quit();
-        console.log('📦 Redis connection closed');
+        console.log('📦 Redis connections closed');
         
     } catch (error) {
         console.error('❌ Error during shutdown:', error.message);
@@ -354,10 +564,83 @@ process.on('unhandledRejection', async (reason, promise) => {
     await gracefulShutdown('UNHANDLED_REJECTION');
 });
 
-// Run recovery check every 5 minutes
-setInterval(recoverStuckJobs, 5 * 60 * 1000);
+// Cleanup old completed jobs (older than 24 hours)
+async function cleanupOldJobs() {
+    try {
+        const completedLength = await redis.llen('jobs:completed');
+        if (completedLength === 0) return;
+        
+        const now = Date.now();
+        const maxAge = 24 * 60 * 60 * 1000; // 24 hours
+        
+        // Get all completed jobs
+        const jobs = [];
+        for (let i = 0; i < completedLength; i++) {
+            const jobStr = await redis.lindex('jobs:completed', i);
+            if (jobStr) {
+                try {
+                    jobs.push(JSON.parse(jobStr));
+                } catch (e) {}
+            }
+        }
+        
+        // Filter jobs to keep (less than 24 hours old)
+        const jobsToKeep = jobs.filter(job => {
+            const age = now - (job.updatedAt || job.createdAt || 0);
+            return age < maxAge;
+        });
+        
+        const removed = jobs.length - jobsToKeep.length;
+        
+        if (removed > 0) {
+            // Clear and re-add only jobs to keep
+            await redis.del('jobs:completed');
+            for (const job of jobsToKeep) {
+                await redis.rpush('jobs:completed', JSON.stringify(job));
+            }
+            console.log(`🧹 Cleaned up ${removed} old completed jobs`);
+        }
+        
+        // Also cleanup failed jobs older than 24 hours
+        const failedLength = await redis.llen('jobs:failed');
+        if (failedLength > 0) {
+            const failedJobs = [];
+            for (let i = 0; i < failedLength; i++) {
+                const jobStr = await redis.lindex('jobs:failed', i);
+                if (jobStr) {
+                    try {
+                        failedJobs.push(JSON.parse(jobStr));
+                    } catch (e) {}
+                }
+            }
+            
+            const failedToKeep = failedJobs.filter(job => {
+                const age = now - (job.updatedAt || job.createdAt || 0);
+                return age < maxAge;
+            });
+            
+            const failedRemoved = failedJobs.length - failedToKeep.length;
+            
+            if (failedRemoved > 0) {
+                await redis.del('jobs:failed');
+                for (const job of failedToKeep) {
+                    await redis.rpush('jobs:failed', JSON.stringify(job));
+                }
+                console.log(`🧹 Cleaned up ${failedRemoved} old failed jobs`);
+            }
+        }
+    } catch (err) {
+        console.error('Error cleaning up old jobs:', err);
+    }
+}
 
 // Run job processing every second
 setInterval(processJobs, 1000);
+
+// Run cleanup every hour
+setInterval(cleanupOldJobs, 60 * 60 * 1000);
+
+// Run cleanup once at startup
+cleanupOldJobs();
 
 console.log('🚀 Worker started and listening for jobs...');
