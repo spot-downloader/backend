@@ -12,11 +12,16 @@ RUN apk add --no-cache \
 # Set working directory
 WORKDIR /app
 
+# Set yt-dlp path for youtube-dl-exec
+ENV YOUTUBE_DL_PATH=/usr/bin/yt-dlp
+
 # Copy package files
 COPY package*.json ./
 
 # Install Node.js dependencies
-RUN npm ci --only=production
+# Skip youtube-dl-exec postinstall since we install yt-dlp via pip
+RUN npm ci --only=production --ignore-scripts && \
+    npm rebuild
 
 # Copy application code
 COPY . .

@@ -77,12 +77,18 @@ function sanitizeFilename(name) {
     return name.replace(/[\\/:"*?<>|]+/g, "");
 }
 
+// Configure youtube-dl-exec options
+const ytdlOptions = process.env.YOUTUBE_DL_PATH 
+    ? { binPath: process.env.YOUTUBE_DL_PATH }
+    : {};
+
 function downloadTrack(query, folder) {
     return youtubedl(`ytsearch1:${query}`,
         {
             extractAudio: true,
             audioFormat: 'mp3',
-            output: `${folder}/%(title)s.%(ext)s`
+            output: `${folder}/%(title)s.%(ext)s`,
+            ...ytdlOptions
         }
     );
 }
