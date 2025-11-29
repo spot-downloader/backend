@@ -1,27 +1,29 @@
 
 FROM node:20-alpine
 
-# Install system dependencies required for youtube-dl and other tools
+# Install system dependencies required for yt-dlp
 RUN apk add --no-cache \
     python3 \
     py3-pip \
     curl \
     ffmpeg \
-    && pip3 install --break-system-packages youtube-dl yt-dlp
+    && pip3 install --break-system-packages yt-dlp==2025.11.12
+
+# Verify yt-dlp installation
+RUN yt-dlp --version && which yt-dlp
 
 # Set working directory
 WORKDIR /app
 
 # Set yt-dlp path for youtube-dl-exec
-ENV YOUTUBE_DL_PATH=/usr/bin/yt-dlp
+ENV YOUTUBE_DL_PATH=/usr/local/bin/yt-dlp
 
 # Copy package files
 COPY package*.json ./
 
 # Install Node.js dependencies
 # Skip youtube-dl-exec postinstall since we install yt-dlp via pip
-RUN npm ci --only=production --ignore-scripts && \
-    npm rebuild
+RUN npm ci --omit=dev --ignore-scripts
 
 # Copy application code
 COPY . .
