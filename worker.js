@@ -77,18 +77,16 @@ function sanitizeFilename(name) {
     return name.replace(/[\\/:"*?<>|]+/g, "");
 }
 
-// Configure youtube-dl-exec options
-const ytdlOptions = process.env.YOUTUBE_DL_PATH 
-    ? { binPath: process.env.YOUTUBE_DL_PATH }
-    : {};
+// Configure youtube-dl-exec with custom binary path
+const ytdlBinary = process.env.YOUTUBE_DL_PATH || 'yt-dlp';
+const youtubedlWithPath = youtubedl.create(ytdlBinary);
 
 function downloadTrack(query, folder) {
-    return youtubedl(`ytsearch1:${query}`,
+    return youtubedlWithPath(`ytsearch1:${query}`,
         {
             extractAudio: true,
             audioFormat: 'mp3',
-            output: `${folder}/%(title)s.%(ext)s`,
-            ...ytdlOptions
+            output: `${folder}/%(title)s.%(ext)s`
         }
     );
 }

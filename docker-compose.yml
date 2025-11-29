@@ -50,6 +50,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=
+      - YOUTUBE_DL_PATH=/usr/bin/yt-dlp
     volumes:
       - downloads_data:/app/downloads
     restart: unless-stopped
