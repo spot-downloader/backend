@@ -15,8 +15,8 @@ RUN yt-dlp --version && which yt-dlp
 # Set working directory
 WORKDIR /app
 
-# Set yt-dlp path for youtube-dl-exec
-ENV YOUTUBE_DL_PATH=/usr/local/bin/yt-dlp
+# Set yt-dlp path for youtube-dl-exec (pip installs to /usr/bin on Alpine)
+ENV YOUTUBE_DL_PATH=/usr/bin/yt-dlp
 
 # Copy package files
 COPY package*.json ./
