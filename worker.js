@@ -96,14 +96,14 @@ function checkIfFileExists(trackName, artist, folder) {
     if (!fs.existsSync(folder)) return false;
     
     const files = fs.readdirSync(folder);
-    // Cari file yang mengandung nama track dan artist (case insensitive)
-    const searchTerm = `${trackName} ${artist}`.toLowerCase();
+    const trackNameLower = trackName.toLowerCase();
     
+    // File harus mengandung nama track (lebih spesifik)
     return files.some(file => {
         if (!file.endsWith('.mp3')) return false;
-        return file.toLowerCase().includes(trackName.toLowerCase()) || 
-               file.toLowerCase().includes(artist.toLowerCase()) ||
-               file.toLowerCase().includes(searchTerm);
+        const fileLower = file.toLowerCase();
+        // Cek apakah filename mengandung nama track
+        return fileLower.includes(trackNameLower);
     });
 }
 
