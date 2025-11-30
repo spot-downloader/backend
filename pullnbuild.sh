@@ -117,11 +117,7 @@ echo "✅ Worker: PM2 managed"
 echo "✅ Frontend: Built"
 echo ""
 echo "PM2 Status:"
-if command -v pm2 &> /dev/null; then
-    pm2 list | grep -E "(spotifydownloader|Process)"
-else
-    echo "  PM2 not installed"
-fi
+pm2 ls
 echo ""
 echo "Useful commands:"
 echo "  pm2 logs [name]     - View logs"
