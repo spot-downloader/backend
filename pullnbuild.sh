@@ -12,7 +12,7 @@ PARENT_DIR="$(dirname "$(pwd)")"
 CURRENT_DIR="$(pwd)"
 
 # ==========================================
-# 1. Backend - Pull and Build Docker
+# 1. Backend - Pull and PM2
 # ==========================================
 echo ""
 echo "[1/2] Processing backend-spotifydownloader..."
@@ -21,25 +21,47 @@ cd "$CURRENT_DIR"
 echo "- Pulling latest changes from git..."
 git pull origin main
 
-echo "- Stopping existing containers..."
-docker compose down
+echo "- Installing dependencies..."
+npm install --production
 
-echo "- Building Docker image..."
-docker compose build
+# PM2 Process Management
+if command -v pm2 &> /dev/null; then
+    BACKEND_NAME="spotifydownloader-backend"
+    WORKER_NAME="spotifydownloader-worker"
+    
+    # Backend API
+    echo "- Checking PM2 process: $BACKEND_NAME..."
+    if pm2 describe "$BACKEND_NAME" &> /dev/null; then
+        echo "- PM2 process found, restarting..."
+        pm2 restart "$BACKEND_NAME"
+        echo "  ✅ PM2 process '$BACKEND_NAME' restarted!"
+    else
+        echo "- PM2 process not found, starting new process..."
+        pm2 start index.js --name "$BACKEND_NAME"
+        echo "  ✅ PM2 process '$BACKEND_NAME' started!"
+    fi
+    
+    # Worker
+    echo "- Checking PM2 process: $WORKER_NAME..."
+    if pm2 describe "$WORKER_NAME" &> /dev/null; then
+        echo "- PM2 process found, restarting..."
+        pm2 restart "$WORKER_NAME"
+        echo "  ✅ PM2 process '$WORKER_NAME' restarted!"
+    else
+        echo "- PM2 process not found, starting new process..."
+        pm2 start worker.js --name "$WORKER_NAME"
+        echo "  ✅ PM2 process '$WORKER_NAME' started!"
+    fi
+    
+    pm2 save
+else
+    echo "  ⚠️  PM2 not installed (manual restart needed)"
+fi
 
-echo "- Starting containers..."
-docker compose up -d
-
-echo "- Waiting for services to be healthy..."
-sleep 5
-
-echo "- Checking container status..."
-docker compose ps
-
-echo "  ✅ Backend updated and running!"
+echo "  ✅ Backend updated!"
 
 # ==========================================
-# 2. Frontend - Pull and Build Docker
+# 2. Frontend - Pull and Build
 # ==========================================
 echo ""
 echo "[2/2] Processing frontend-spotifydownloader..."
@@ -48,19 +70,40 @@ cd "$PARENT_DIR/frontend-spotifydownloader"
 echo "- Pulling latest changes from git..."
 git pull origin main
 
-echo "- Stopping existing containers..."
-docker compose down
+echo "- Installing dependencies..."
+npm install
 
-echo "- Building Docker image..."
-docker compose build
+echo "- Removing old build..."
+rm -rf dist
 
-echo "- Starting containers..."
-docker compose up -d
+echo "- Building frontend..."
+npm run build
 
-echo "- Checking container status..."
-docker compose ps
+# PM2 for Frontend (jika pakai SSR/server, skip jika static)
+if command -v pm2 &> /dev/null; then
+    FRONTEND_NAME="spotifydownloader-frontend"
+    
+    # Cek apakah ada server.js untuk frontend
+    if [ -f "server.js" ]; then
+        echo "- Checking PM2 process: $FRONTEND_NAME..."
+        if pm2 describe "$FRONTEND_NAME" &> /dev/null; then
+            echo "- PM2 process found, restarting..."
+            pm2 restart "$FRONTEND_NAME"
+            echo "  ✅ PM2 process '$FRONTEND_NAME' restarted!"
+        else
+            echo "- PM2 process not found, starting new process..."
+            pm2 start server.js --name "$FRONTEND_NAME"
+            echo "  ✅ PM2 process '$FRONTEND_NAME' started!"
+        fi
+        pm2 save
+    else
+        echo "  ℹ️  Frontend is static (served by nginx/other web server)"
+    fi
+else
+    echo "  ⚠️  PM2 not installed"
+fi
 
-echo "  ✅ Frontend updated and running!"
+echo "  ✅ Frontend build completed!"
 
 # ==========================================
 # Summary
@@ -69,19 +112,20 @@ echo ""
 echo "=========================================="
 echo "Pull & Build Completed Successfully!"
 echo "=========================================="
-echo "✅ Backend: Docker containers running"
-echo "✅ Frontend: Docker containers running"
+echo "✅ Backend API: PM2 managed"
+echo "✅ Worker: PM2 managed"
+echo "✅ Frontend: Built"
 echo ""
-echo "Container Status:"
-docker ps --filter "name=spotifydownloader" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-echo ""
-echo "Access your applications:"
-echo "  Backend API: http://localhost:3081"
-echo "  Frontend: http://localhost:3080"
+echo "PM2 Status:"
+if command -v pm2 &> /dev/null; then
+    pm2 list | grep -E "(spotifydownloader|Process)"
+else
+    echo "  PM2 not installed"
+fi
 echo ""
 echo "Useful commands:"
-echo "  docker compose logs -f           - View logs"
-echo "  docker compose restart           - Restart containers"
-echo "  docker compose down              - Stop containers"
-echo "  docker exec -it <container> sh   - Enter container shell"
+echo "  pm2 logs [name]     - View logs"
+echo "  pm2 restart [name]  - Restart process"
+echo "  pm2 stop [name]     - Stop process"
+echo "  pm2 monit           - Monitor all processes"
 echo "=========================================="
