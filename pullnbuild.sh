@@ -65,7 +65,23 @@ echo "  ✅ Backend updated!"
 # ==========================================
 echo ""
 echo "[2/2] Processing frontend-spotifydownloader..."
-cd "$PARENT_DIR/frontend-spotifydownloader"
+
+# Try different possible frontend paths
+if [ -d "$PARENT_DIR/frontend-spotifydownloader" ]; then
+    cd "$PARENT_DIR/frontend-spotifydownloader"
+elif [ -d "$PARENT_DIR/frontend" ]; then
+    cd "$PARENT_DIR/frontend"
+else
+    echo "  ⚠️  Frontend directory not found, skipping..."
+    echo ""
+    echo "=========================================="
+    echo "Pull & Build Completed!"
+    echo "=========================================="
+    echo "✅ Backend API: PM2 managed"
+    echo "✅ Worker: PM2 managed"
+    echo "⚠️  Frontend: Not found"
+    exit 0
+fi
 
 echo "- Pulling latest changes from git..."
 git pull origin main
