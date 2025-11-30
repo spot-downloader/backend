@@ -243,7 +243,8 @@ app.get("/downloads/track", async (req, res) => {
             res.setHeader('Content-Disposition', `attachment; filename="${sanitizedFilename}.zip"`);
             res.setHeader('Content-Type', 'application/zip');
 
-            const archive = archiver('zip', { zlib: { level: 9 } });
+            // level: 0 = store only (no compression) - much faster for already compressed files like MP3
+            const archive = archiver('zip', { zlib: { level: 0 } });
             archive.on('error', err => {
                 console.error('Archive error:', err);
                 if (!res.headersSent) {
@@ -308,8 +309,9 @@ app.get("/downloads/playlist", async (req, res) => {
             res.setHeader('Content-Disposition', `attachment; filename="${sanitizedFilename}.zip"`);
             res.setHeader('Content-Type', 'application/zip');
 
+            // level: 0 = store only (no compression) - faster for MP3
             const archive = archiver('zip', {
-                zlib: { level: 9 }
+                zlib: { level: 0 }
             });
 
             archive.on('error', err => {
@@ -377,8 +379,9 @@ app.get("/downloads/album", async (req, res) => {
             res.setHeader('Content-Disposition', `attachment; filename="${sanitizedFilename}.zip"`);
             res.setHeader('Content-Type', 'application/zip');
 
+            // level: 0 = store only (no compression) - faster for MP3
             const archive = archiver('zip', {
-                zlib: { level: 9 }
+                zlib: { level: 0 }
             });
 
             archive.on('error', err => {
@@ -446,8 +449,9 @@ app.get("/downloads/artist", async (req, res) => {
             res.setHeader('Content-Disposition', `attachment; filename="${sanitizedFilename}.zip"`);
             res.setHeader('Content-Type', 'application/zip');
 
+            // level: 0 = store only (no compression) - much faster for already compressed files like MP3
             const archive = archiver('zip', {
-                zlib: { level: 9 }
+                zlib: { level: 0 }
             });
 
             archive.on('error', err => {
