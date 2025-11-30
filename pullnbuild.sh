@@ -22,7 +22,7 @@ echo "- Pulling latest changes from git..."
 git pull origin main
 
 echo "- Installing dependencies..."
-npm install --production
+npm install --omit=dev
 
 # PM2 Process Management
 if command -v pm2 &> /dev/null; then
